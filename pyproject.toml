@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flatten-filelist"
+version = "0.1.1"
+description = "Flatten Verilog filelists: resolve -f includes, expand env vars, filter preprocessor conditionals"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+
+[project.urls]
+Repository = "https://github.com/huanghhhz/flatten-filelist"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["flatten_filelist"]
+artifacts = ["flatten_filelist/_bin/flatten-filelist"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/flatten_filelist",
+]

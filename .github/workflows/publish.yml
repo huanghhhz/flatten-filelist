@@ -1,0 +1,36 @@
+name: Build and publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust musl target
+        run: rustup target add x86_64-unknown-linux-musl
+
+      - name: Build static binary
+        run: cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+
+      - name: Copy binary into package
+        run: cp target/x86_64-unknown-linux-musl/release/flatten-filelist flatten_filelist/_bin/flatten-filelist
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
