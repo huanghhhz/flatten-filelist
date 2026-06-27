@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -33,7 +33,7 @@ pub fn directive_filter(lines: &[String], directives: &mut Vec<String>) -> Vec<S
 
     for line in lines {
         let trimmed = line.trim();
-        if trimmed.starts_with('`') {
+        if trimmed.starts_with('`') && !trimmed.starts_with("`define") {
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
             match parts[0] {
                 "`ifdef" => {
@@ -64,12 +64,13 @@ pub fn directive_filter(lines: &[String], directives: &mut Vec<String>) -> Vec<S
         } else {
             let active = all_matched(&macro_matched) || wildcard;
             if active {
-                output.push(line.clone());
                 if !wildcard && (trimmed.starts_with("-def") || trimmed.starts_with("`define")) {
                     let def_parts: Vec<&str> = trimmed.split_whitespace().collect();
                     if def_parts.len() >= 2 {
                         directives.push(def_parts[1].to_string());
                     }
+                } else {
+                    output.push(line.clone());
                 }
             }
         }
@@ -77,7 +78,32 @@ pub fn directive_filter(lines: &[String], directives: &mut Vec<String>) -> Vec<S
     output
 }
 
-pub fn read_filelist(path: &Path, directives: &mut Vec<String>) -> (Vec<String>, Vec<String>) {
+pub fn read_filelists(paths: &[&Path], directives: &mut Vec<String>, recursive: bool) -> (Vec<String>, Vec<String>) {
+    let mut all_content: Vec<String> = Vec::new();
+    let mut all_errors: Vec<String> = Vec::new();
+    for path in paths {
+        let (content, errors) = read_filelist(path, directives, recursive);
+        all_content.extend(content);
+        all_errors.extend(errors);
+    }
+    dedup_vec(&mut all_content);
+    dedup_vec(&mut all_errors);
+    (all_content, all_errors)
+}
+
+pub fn read_filelist(path: &Path, directives: &mut Vec<String>, recursive: bool) -> (Vec<String>, Vec<String>) {
+    let (mut content, mut errors) = _read_filelist(path, directives, recursive);
+    dedup_vec(&mut content);
+    dedup_vec(&mut errors);
+    (content, errors)
+}
+
+fn dedup_vec(v: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    v.retain(|item| seen.insert(item.clone()));
+}
+
+fn _read_filelist(path: &Path, directives: &mut Vec<String>, recursive: bool) -> (Vec<String>, Vec<String>) {
     let mut out_content: Vec<String> = Vec::new();
     let mut errs: Vec<String> = Vec::new();
 
@@ -98,12 +124,12 @@ pub fn read_filelist(path: &Path, directives: &mut Vec<String>) -> (Vec<String>,
 
     for line in &filtered {
         let trimmed = line.trim();
-        if trimmed.starts_with("-f ") {
+        if recursive && trimmed.starts_with("-f ") {
             let sub_path_str = trimmed[3..].trim();
             match env_decode(sub_path_str) {
                 Ok(decoded) => {
                     let sub_path = Path::new(&decoded);
-                    let (sub_content, sub_errs) = read_filelist(sub_path, directives);
+                    let (sub_content, sub_errs) = _read_filelist(sub_path, directives, recursive);
                     out_content.extend(sub_content);
                     errs.extend(sub_errs);
                 }
@@ -111,8 +137,8 @@ pub fn read_filelist(path: &Path, directives: &mut Vec<String>) -> (Vec<String>,
                     errs.push(e);
                 }
             }
-        } else {
-            out_content.push(line.clone());
+        } else if !trimmed.is_empty() && !trimmed.starts_with("//") {
+            out_content.push(trimmed.to_string());
         }
     }
 

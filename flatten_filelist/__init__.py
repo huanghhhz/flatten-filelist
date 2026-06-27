@@ -2,7 +2,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Union
+
 
 if sys.platform != "linux" or os.uname().machine != "x86_64":
     raise RuntimeError(
@@ -14,12 +15,17 @@ def _binary_path() -> Path:
     return Path(__file__).parent / "_bin" / "flatten-filelist"
 
 
-def flatten_filelist(filelist: str, directives: List[str]) -> Tuple[List[str], List[str]]:
-    """Flatten a Verilog filelist by resolving includes and filtering directives.
+def flatten_filelist(
+    filelist: Union[str, List[str]],
+    directives: List[str],
+    no_recursive: bool = False,
+) -> Tuple[List[str], List[str]]:
+    """Flatten Verilog filelists by resolving includes and filtering directives.
 
     Args:
-        filelist: Path to the top-level filelist.
+        filelist: Path to a single filelist, or a list of filelist paths.
         directives: Preprocessor defines to use for conditional filtering.
+        no_recursive: If True, do not recursively resolve -f include directives.
 
     Returns:
         Tuple of (content_lines, error_messages).
@@ -28,7 +34,15 @@ def flatten_filelist(filelist: str, directives: List[str]) -> Tuple[List[str], L
     if not bin_path.is_file():
         return [], [f"binary not found: {bin_path}"]
 
-    cmd = [str(bin_path), filelist, *directives]
+    filelists = [filelist] if isinstance(filelist, str) else list(filelist)
+    cmd = [str(bin_path)]
+    if no_recursive:
+        cmd.append("--no-recursive")
+    cmd.extend(filelists)
+    if directives:
+        cmd.append("-d")
+        cmd.extend(directives)
+
     try:
         proc = subprocess.run(
             cmd,
