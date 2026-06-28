@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 pub fn env_decode(input: &str) -> Result<String, String> {
     if !input.contains('$') {
@@ -21,6 +21,147 @@ pub fn env_decode(input: &str) -> Result<String, String> {
         }
     }
     Ok(arr.join("/"))
+}
+
+/// Parse a filelist item line, returning the prefix and the path portion.
+/// Recognizes `-v `, `-y `, and `+incdir+` prefixes.
+fn parse_item_path(line: &str) -> (&str, &str) {
+    if let Some(rest) = line.strip_prefix("-v ") {
+        ("-v ", rest)
+    } else if let Some(rest) = line.strip_prefix("-y ") {
+        ("-y ", rest)
+    } else if let Some(rest) = line.strip_prefix("+incdir+") {
+        ("+incdir+", rest)
+    } else {
+        ("", line)
+    }
+}
+
+/// Normalize `.` and `..` components in a path without touching the filesystem.
+/// Does NOT resolve symlinks (unlike `canonicalize`).
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components: Vec<Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                components.pop();
+            }
+            Component::CurDir => {}
+            c => components.push(c),
+        }
+    }
+    components.into_iter().collect()
+}
+
+/// Expand env vars in a path string, then resolve to an absolute path
+/// (normalizing `.` and `..`) without following symlinks.
+pub fn resolve_absolute(path_str: &str) -> Result<String, String> {
+    let expanded = env_decode(path_str)?;
+    let path = Path::new(&expanded);
+    let abs = if path.is_absolute() {
+        normalize_path(path)
+    } else {
+        let cwd = env::current_dir()
+            .map_err(|e| format!("cannot get current dir: {}", e))?;
+        normalize_path(&cwd.join(path))
+    };
+    Ok(abs.to_string_lossy().to_string())
+}
+
+/// Replace the prefix of `abs_path` that matches the value of `env_name`
+/// with `$ENV_NAME`. If the path doesn't start with the env value, it is
+/// returned unchanged.
+pub fn encode_with_env_name(abs_path: &str, env_name: &str) -> Result<String, String> {
+    let env_val = env::var(env_name)
+        .map_err(|_| format!("ENV_NOT_FOUND: {}", env_name))?;
+    let env_path = Path::new(&env_val);
+    let abs = Path::new(abs_path);
+
+    match abs.strip_prefix(env_path) {
+        Ok(relative) => {
+            if relative.as_os_str().is_empty() {
+                Ok(format!("${}", env_name))
+            } else {
+                Ok(format!("${}/{}", env_name, relative.display()))
+            }
+        }
+        Err(_) => Ok(abs_path.to_string()),
+    }
+}
+
+/// Post-process content items: parse prefixes, expand env vars, resolve to
+/// absolute paths, check existence, and optionally encode back with an env var.
+fn process_content_items(
+    items: Vec<String>,
+    check_exist: bool,
+    resolve_path: bool,
+    encode_with_env: Option<&str>,
+) -> (Vec<String>, Vec<String>) {
+    let mut processed: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    let effective_resolve = resolve_path || encode_with_env.is_some();
+    let effective_check = check_exist || effective_resolve;
+
+    for item in items {
+        // +libext+, +define+, and other + directives are opaque —
+        // they are not file paths, so skip all processing
+        if item.starts_with('+') && !item.starts_with("+incdir+") {
+            processed.push(item);
+            continue;
+        }
+
+        let (prefix, path_str) = parse_item_path(&item);
+
+        // Step 1: Expand env vars in the path
+        let expanded = match env_decode(path_str) {
+            Ok(s) => s,
+            Err(e) => {
+                errors.push(format!("{} in item: {}", e, item));
+                processed.push(item);
+                continue;
+            }
+        };
+
+        // Step 2: Resolve to absolute path if needed
+        let final_path = if effective_resolve {
+            match resolve_absolute(&expanded) {
+                Ok(s) => s,
+                Err(e) => {
+                    errors.push(format!("{} in item: {}", e, item));
+                    processed.push(item);
+                    continue;
+                }
+            }
+        } else {
+            expanded
+        };
+
+        // Step 3: Check existence (keep item in output, report error if missing)
+        if effective_check && !Path::new(&final_path).exists() {
+            errors.push(format!("item not found: {}", item));
+        }
+
+        // Step 4: Reconstruct the item
+        let final_item = if let Some(env_name) = encode_with_env {
+            match encode_with_env_name(&final_path, env_name) {
+                Ok(encoded) => format!("{}{}", prefix, encoded),
+                Err(e) => {
+                    errors.push(e);
+                    format!("{}{}", prefix, final_path)
+                }
+            }
+        } else if effective_resolve {
+            format!("{}{}", prefix, final_path)
+        } else {
+            // check_exist only: keep original form
+            item
+        };
+
+        processed.push(final_item);
+    }
+
+    (processed, errors)
 }
 
 /// Filter filelist lines based on Verilog preprocessor directive conditionals.
@@ -78,23 +219,68 @@ pub fn directive_filter(lines: &[String], directives: &mut Vec<String>) -> Vec<S
     output
 }
 
-pub fn read_filelists(paths: &[&Path], directives: &mut Vec<String>, recursive: bool) -> (Vec<String>, Vec<String>) {
+pub fn read_filelists(
+    paths: &[&Path],
+    directives: &mut Vec<String>,
+    recursive: bool,
+    deduplication: bool,
+    check_exist: bool,
+    resolve_path: bool,
+    encode_with_env: Option<&str>,
+) -> (Vec<String>, Vec<String>) {
     let mut all_content: Vec<String> = Vec::new();
     let mut all_errors: Vec<String> = Vec::new();
     for path in paths {
-        let (content, errors) = read_filelist(path, directives, recursive);
+        let (content, errors) =
+            read_filelist(path, directives, recursive, deduplication, check_exist, resolve_path, encode_with_env);
         all_content.extend(content);
         all_errors.extend(errors);
     }
-    dedup_vec(&mut all_content);
-    dedup_vec(&mut all_errors);
+    let effective_resolve = resolve_path || encode_with_env.is_some();
+    let effective_check = check_exist || effective_resolve;
+    let effective_dedup = deduplication || effective_check;
+    if effective_dedup {
+        dedup_vec(&mut all_content);
+        dedup_vec(&mut all_errors);
+    }
     (all_content, all_errors)
 }
 
-pub fn read_filelist(path: &Path, directives: &mut Vec<String>, recursive: bool) -> (Vec<String>, Vec<String>) {
-    let (mut content, mut errors) = _read_filelist(path, directives, recursive);
-    dedup_vec(&mut content);
-    dedup_vec(&mut errors);
+pub fn read_filelist(
+    path: &Path,
+    directives: &mut Vec<String>,
+    recursive: bool,
+    deduplication: bool,
+    check_exist: bool,
+    resolve_path: bool,
+    encode_with_env: Option<&str>,
+) -> (Vec<String>, Vec<String>) {
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let (mut content, mut errors) = _read_filelist(path, directives, recursive, &mut visited);
+
+    let effective_resolve = resolve_path || encode_with_env.is_some();
+    let effective_check = check_exist || effective_resolve;
+    let effective_dedup = deduplication || effective_check;
+
+    if effective_dedup {
+        dedup_vec(&mut content);
+        dedup_vec(&mut errors);
+    }
+
+    if effective_check {
+        let (processed_content, processed_errors) =
+            process_content_items(content, effective_check, effective_resolve, encode_with_env);
+        content = processed_content;
+        errors.extend(processed_errors);
+
+        // Re-dedup after resolve/encode: different relative paths may
+        // collapse to the same absolute/encoded path.
+        if effective_resolve && effective_dedup {
+            dedup_vec(&mut content);
+            dedup_vec(&mut errors);
+        }
+    }
+
     (content, errors)
 }
 
@@ -103,7 +289,46 @@ fn dedup_vec(v: &mut Vec<String>) {
     v.retain(|item| seen.insert(item.clone()));
 }
 
-fn _read_filelist(path: &Path, directives: &mut Vec<String>, recursive: bool) -> (Vec<String>, Vec<String>) {
+fn _read_filelist(
+    path: &Path,
+    directives: &mut Vec<String>,
+    recursive: bool,
+    visited: &mut HashSet<PathBuf>,
+) -> (Vec<String>, Vec<String>) {
+    let mut errs: Vec<String> = Vec::new();
+
+    // Resolve canonical path for cycle detection on the current call stack
+    let canonical = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            match resolve_absolute(&path.to_string_lossy()) {
+                Ok(p) => PathBuf::from(p),
+                Err(_) => path.to_path_buf(),
+            }
+        }
+    };
+
+    if !visited.insert(canonical.clone()) {
+        errs.push(format!(
+            "circular include detected: {}",
+            path.display()
+        ));
+        return (Vec::new(), errs);
+    }
+
+    // Ensure we clean up visited on every return path
+    let result = _read_filelist_impl(path, directives, recursive, visited);
+
+    visited.remove(&canonical);
+    result
+}
+
+fn _read_filelist_impl(
+    path: &Path,
+    directives: &mut Vec<String>,
+    recursive: bool,
+    visited: &mut HashSet<PathBuf>,
+) -> (Vec<String>, Vec<String>) {
     let mut out_content: Vec<String> = Vec::new();
     let mut errs: Vec<String> = Vec::new();
 
@@ -129,7 +354,7 @@ fn _read_filelist(path: &Path, directives: &mut Vec<String>, recursive: bool) ->
             match env_decode(sub_path_str) {
                 Ok(decoded) => {
                     let sub_path = Path::new(&decoded);
-                    let (sub_content, sub_errs) = _read_filelist(sub_path, directives, recursive);
+                    let (sub_content, sub_errs) = _read_filelist(sub_path, directives, recursive, visited);
                     out_content.extend(sub_content);
                     errs.extend(sub_errs);
                 }
