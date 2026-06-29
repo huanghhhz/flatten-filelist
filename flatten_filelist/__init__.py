@@ -18,8 +18,8 @@ def _binary_path() -> Path:
 def flatten_filelist(
     filelist: Union[str, List[str]],
     directives: List[str],
-    no_recursive: bool = False,
-    deduplication: bool = False,
+    recursive: bool = False,
+    deduplicate: bool = False,
     check_exist: bool = False,
     resolve_path: bool = False,
     encode_with_env: Optional[str] = None,
@@ -29,8 +29,9 @@ def flatten_filelist(
     Args:
         filelist: Path to a single filelist, or a list of filelist paths.
         directives: Preprocessor defines to use for conditional filtering.
-        no_recursive: If True, do not recursively resolve -f include directives.
-        deduplication: If True, deduplicate output lines. Implied by check_exist,
+        recursive: If True, recursively resolve -f include directives.
+            Default False (non-recursive, only the top-level filelist is read).
+        deduplicate: If True, deduplicate output lines. Implied by check_exist,
             resolve_path, or encode_with_env.
         check_exist: If True, check that every output item exists on disk.
             Handles -v/-y/+incdir+ prefixes and env vars in paths.
@@ -48,10 +49,12 @@ def flatten_filelist(
 
     filelists = [filelist] if isinstance(filelist, str) else list(filelist)
     cmd = [str(bin_path)]
-    if no_recursive:
-        cmd.append("--no-recursive")
-    if deduplication:
-        cmd.append("--deduplication")
+    if recursive:
+        cmd.append("--recursive")
+    if deduplicate:
+        cmd.append("--deduplicate")
+    if check_exist:
+        cmd.append("--check-exist")
     if resolve_path:
         cmd.append("--resolve-path")
     if encode_with_env is not None:

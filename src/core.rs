@@ -223,7 +223,7 @@ pub fn read_filelists(
     paths: &[&Path],
     directives: &mut Vec<String>,
     recursive: bool,
-    deduplication: bool,
+    deduplicate: bool,
     check_exist: bool,
     resolve_path: bool,
     encode_with_env: Option<&str>,
@@ -232,13 +232,13 @@ pub fn read_filelists(
     let mut all_errors: Vec<String> = Vec::new();
     for path in paths {
         let (content, errors) =
-            read_filelist(path, directives, recursive, deduplication, check_exist, resolve_path, encode_with_env);
+            read_filelist(path, directives, recursive, deduplicate, check_exist, resolve_path, encode_with_env);
         all_content.extend(content);
         all_errors.extend(errors);
     }
     let effective_resolve = resolve_path || encode_with_env.is_some();
     let effective_check = check_exist || effective_resolve;
-    let effective_dedup = deduplication || effective_check;
+    let effective_dedup = deduplicate || effective_check;
     if effective_dedup {
         dedup_vec(&mut all_content);
         dedup_vec(&mut all_errors);
@@ -250,7 +250,7 @@ pub fn read_filelist(
     path: &Path,
     directives: &mut Vec<String>,
     recursive: bool,
-    deduplication: bool,
+    deduplicate: bool,
     check_exist: bool,
     resolve_path: bool,
     encode_with_env: Option<&str>,
@@ -260,7 +260,7 @@ pub fn read_filelist(
 
     let effective_resolve = resolve_path || encode_with_env.is_some();
     let effective_check = check_exist || effective_resolve;
-    let effective_dedup = deduplication || effective_check;
+    let effective_dedup = deduplicate || effective_check;
 
     if effective_dedup {
         dedup_vec(&mut content);
