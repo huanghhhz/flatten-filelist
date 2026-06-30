@@ -38,9 +38,10 @@ Hatchling bundles `flatten_filelist/_bin/flatten-filelist` into the wheel via `[
 | `env_decode` | `(&str) -> Result<String, String>` | Expand `$VAR`/`${VAR}`; `Err("ENV_NOT_FOUND: <name>")` |
 | `directive_filter` | `(&[String], &mut Vec<String>) -> Vec<String>` | Filter conditionals; ` `define `/`-def` skip the directive parser, accumulate in active blocks |
 | `read_filelists` | `(&[&Path], &mut Vec<String>, recursive, deduplicate, check_exist, resolve_path, encode_with_env) -> (Vec<String>, Vec<String>)` | Multi-filelist entry point |
-| `read_filelist` | `(&Path, &mut Vec<String>, recursive, deduplicate, check_exist, resolve_path, encode_with_env) -> (Vec<String>, Vec<String>)` | Single filelist: cycle-detect → read → dedup → post-process |
-| `_read_filelist` | `(&Path, &mut Vec<String>, recursive, &mut HashSet<PathBuf>) -> (Vec<String>, Vec<String>)` | Cycle guard: canonicalize → check visited → delegate → clean up |
+| `read_filelist` | `(&Path, &mut Vec<String>, recursive, deduplicate, check_exist, resolve_path, encode_with_env) -> (Vec<String>, Vec<String>)` | Single filelist: creates visited+cache → read → dedup → post-process |
+| `_read_filelist` | `(&Path, &mut Vec<String>, recursive, &mut HashSet<PathBuf>, &mut HashMap<PathBuf, (Vec<String>, Vec<String>)>) -> (Vec<String>, Vec<String>)` | Cache check → cycle guard → delegate → cache/store result |
 | `_read_filelist_impl` | same | Actual read: open file, directive_filter, resolve `-f` via `_read_filelist`, collect content |
+| `resolve_canonical` | `(&Path) -> PathBuf` | Resolve canonical path for cache keys and cycle detection (canonicalize → resolve_absolute fallback → raw path fallback) |
 | `process_content_items` | `(Vec<String>, check_exist, resolve_path, encode_with_env) -> (Vec<String>, Vec<String>)` | Post-processing pipeline |
 | `parse_item_path` | `(&str) -> (&str, &str)` | Split `-v `/`-y `/`+incdir+` prefix from path |
 | `resolve_absolute` | `(&str) -> Result<String, String>` | env_decode → join cwd → normalize `..` (no symlink resolve) |
@@ -87,7 +88,8 @@ Errors from stderr are stripped of `ERROR: ` prefix. Platform guard raises `Runt
 ## Gotchas
 
 - **Empty/comment lines**: filtered at `_read_filelist_impl` level (empty or `//`), never reach output.
-- **Circular includes**: detected via `visited: HashSet<PathBuf>` on call stack. Canonicalize → check visited → insert → recurse → remove. Diamond includes (same file via different branches) are fine.
+- **Circular includes**: detected via `visited: HashSet<PathBuf>` on call stack. Canonicalize → check visited → insert → recurse → remove.
+- **Result caching**: `_read_filelist` caches parsed `(content, errors)` by canonical path in a `HashMap<PathBuf, (Vec<String>, Vec<String>)>`. Diamond includes (same file via different branches) hit the cache and are not re-parsed. Cache lives for the duration of one `read_filelist` call.
 - **`` `define `` / `-def` accumulation**: ` `define `` lines skip the preprocessor-directive parser (line 177: `starts_with('`') && !starts_with("`define")`). They fall through to the active-block check: if active and not wildcard, the macro name is pushed into `directives` and the line is excluded from output. `-def` lines are handled the same way.
 - **`directive_filter` mutates `directives`**: defines from nested filelists visible to later siblings.
 - **`+libext+`/`+define+`**: opaque — no env expansion, no path resolution, no existence check.

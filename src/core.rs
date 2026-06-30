@@ -256,7 +256,8 @@ pub fn read_filelist(
     encode_with_env: Option<&str>,
 ) -> (Vec<String>, Vec<String>) {
     let mut visited: HashSet<PathBuf> = HashSet::new();
-    let (mut content, mut errors) = _read_filelist(path, directives, recursive, &mut visited);
+    let mut cache: HashMap<PathBuf, (Vec<String>, Vec<String>)> = HashMap::new();
+    let (mut content, mut errors) = _read_filelist(path, directives, recursive, &mut visited, &mut cache);
 
     let effective_resolve = resolve_path || encode_with_env.is_some();
     let effective_check = check_exist || effective_resolve;
@@ -289,16 +290,8 @@ fn dedup_vec(v: &mut Vec<String>) {
     v.retain(|item| seen.insert(item.clone()));
 }
 
-fn _read_filelist(
-    path: &Path,
-    directives: &mut Vec<String>,
-    recursive: bool,
-    visited: &mut HashSet<PathBuf>,
-) -> (Vec<String>, Vec<String>) {
-    let mut errs: Vec<String> = Vec::new();
-
-    // Resolve canonical path for cycle detection on the current call stack
-    let canonical = match path.canonicalize() {
+fn resolve_canonical(path: &Path) -> PathBuf {
+    match path.canonicalize() {
         Ok(p) => p,
         Err(_) => {
             match resolve_absolute(&path.to_string_lossy()) {
@@ -306,20 +299,36 @@ fn _read_filelist(
                 Err(_) => path.to_path_buf(),
             }
         }
-    };
+    }
+}
+
+fn _read_filelist(
+    path: &Path,
+    directives: &mut Vec<String>,
+    recursive: bool,
+    visited: &mut HashSet<PathBuf>,
+    cache: &mut HashMap<PathBuf, (Vec<String>, Vec<String>)>,
+) -> (Vec<String>, Vec<String>) {
+    let canonical = resolve_canonical(path);
+
+    if let Some((content, errs)) = cache.get(&canonical) {
+        return (content.clone(), errs.clone());
+    }
 
     if !visited.insert(canonical.clone()) {
-        errs.push(format!(
+        let errs = vec![format!(
             "circular include detected: {}",
             path.display()
-        ));
+        )];
         return (Vec::new(), errs);
     }
 
     // Ensure we clean up visited on every return path
-    let result = _read_filelist_impl(path, directives, recursive, visited);
+    let result = _read_filelist_impl(path, directives, recursive, visited, cache);
 
     visited.remove(&canonical);
+
+    cache.insert(canonical, result.clone());
     result
 }
 
@@ -328,6 +337,7 @@ fn _read_filelist_impl(
     directives: &mut Vec<String>,
     recursive: bool,
     visited: &mut HashSet<PathBuf>,
+    cache: &mut HashMap<PathBuf, (Vec<String>, Vec<String>)>,
 ) -> (Vec<String>, Vec<String>) {
     let mut out_content: Vec<String> = Vec::new();
     let mut errs: Vec<String> = Vec::new();
@@ -354,7 +364,7 @@ fn _read_filelist_impl(
             match env_decode(sub_path_str) {
                 Ok(decoded) => {
                     let sub_path = Path::new(&decoded);
-                    let (sub_content, sub_errs) = _read_filelist(sub_path, directives, recursive, visited);
+                    let (sub_content, sub_errs) = _read_filelist(sub_path, directives, recursive, visited, cache);
                     out_content.extend(sub_content);
                     errs.extend(sub_errs);
                 }
