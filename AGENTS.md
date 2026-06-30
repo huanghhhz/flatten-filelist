@@ -63,11 +63,11 @@ Re-deduplication happens after resolve/encode if `effective_dedup` is true (diff
 ## CLI
 
 ```
-flatten-filelist [--recursive] [--deduplicate] [--check-exist] [--resolve-path]
-                 [--encode-with-env <NAME>] <filelist...> [-d DEFINE...]
+flatten-filelist <filelist...> [--recursive] [--deduplicate] [--check-exist]
+                 [--resolve-path] [--encode-with-env <NAME>] [-d DEFINE...]
 ```
 
-Default: non-recursive, no dedup, no post-processing. Content → stdout, errors → stderr (`ERROR: ` prefix). Exit 1 if errors.
+Filelists must come first. Remaining flags are position-independent. `-d`/`--define` consumes all following args until the next flag. Default: non-recursive, no dedup, no post-processing. Content → stdout, errors → stderr (`ERROR: ` prefix). Exit 1 if errors.
 
 ## Python API
 

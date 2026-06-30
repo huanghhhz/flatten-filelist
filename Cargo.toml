@@ -1,6 +1,6 @@
 [package]
 name = "flatten-filelist"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [lib]
@@ -15,4 +15,4 @@ python-bindings = ["pyo3", "pyo3/extension-module"]
 pyo3 = { version = "0.22", optional = true }
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile = "3.27"
