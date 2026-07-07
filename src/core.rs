@@ -3,6 +3,19 @@ use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+/// Source location within a filelist (1-based line number).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceLoc {
+    file: PathBuf,
+    line: usize,
+}
+
+impl SourceLoc {
+    fn display(&self) -> String {
+        format!("{}:{}", self.file.display(), self.line)
+    }
+}
+
 pub fn env_decode(input: &str) -> Result<String, String> {
     if !input.contains('$') {
         return Ok(input.to_string());
@@ -91,8 +104,9 @@ pub fn encode_with_env_name(abs_path: &str, env_name: &str) -> Result<String, St
 
 /// Post-process content items: parse prefixes, expand env vars, resolve to
 /// absolute paths, check existence, and optionally encode back with an env var.
+/// Each item carries a SourceLoc for use in error messages.
 fn process_content_items(
-    items: Vec<String>,
+    items: Vec<(String, SourceLoc)>,
     check_exist: bool,
     resolve_path: bool,
     encode_with_env: Option<&str>,
@@ -103,7 +117,7 @@ fn process_content_items(
     let effective_resolve = resolve_path || encode_with_env.is_some();
     let effective_check = check_exist || effective_resolve;
 
-    for item in items {
+    for (item, loc) in items {
         // +libext+, +define+, and other + directives are opaque —
         // they are not file paths, so skip all processing
         if item.starts_with('+') && !item.starts_with("+incdir+") {
@@ -117,7 +131,7 @@ fn process_content_items(
         let expanded = match env_decode(path_str) {
             Ok(s) => s,
             Err(e) => {
-                errors.push(format!("{} in item: {}", e, item));
+                errors.push(format!("{} ({})", e, loc.file.display()));
                 processed.push(item);
                 continue;
             }
@@ -128,7 +142,7 @@ fn process_content_items(
             match resolve_absolute(&expanded) {
                 Ok(s) => s,
                 Err(e) => {
-                    errors.push(format!("{} in item: {}", e, item));
+                    errors.push(format!("{} ({})", e, loc.file.display()));
                     processed.push(item);
                     continue;
                 }
@@ -139,7 +153,7 @@ fn process_content_items(
 
         // Step 3: Check existence (keep item in output, report error if missing)
         if effective_check && !Path::new(&final_path).exists() {
-            errors.push(format!("item not found: {}", item));
+            errors.push(format!("item not found: {} ({})", item, loc.display()));
         }
 
         // Step 4: Reconstruct the item
@@ -147,7 +161,7 @@ fn process_content_items(
             match encode_with_env_name(&final_path, env_name) {
                 Ok(encoded) => format!("{}{}", prefix, encoded),
                 Err(e) => {
-                    errors.push(e);
+                    errors.push(format!("{} ({})", e, loc.file.display()));
                     format!("{}{}", prefix, final_path)
                 }
             }
@@ -219,6 +233,64 @@ pub fn directive_filter(lines: &[String], directives: &mut Vec<String>) -> Vec<S
     output
 }
 
+/// Like directive_filter but preserves original 1-based line numbers
+/// for each output line.
+fn directive_filter_with_lines(
+    lines: &[String],
+    directives: &mut Vec<String>,
+) -> Vec<(String, usize)> {
+    let mut output: Vec<(String, usize)> = Vec::new();
+    let mut macro_matched: Vec<Option<bool>> = vec![Some(true)];
+    let all_matched = |stack: &[Option<bool>]| stack.iter().all(|b| *b == Some(true));
+    let wildcard = directives.contains(&"*".to_string());
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('`') && !trimmed.starts_with("`define") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            match parts[0] {
+                "`ifdef" => {
+                    macro_matched.push(Some(directives.contains(&parts[1].to_string())));
+                }
+                "`ifndef" => {
+                    macro_matched.push(Some(!directives.contains(&parts[1].to_string())));
+                }
+                "`elsif" => {
+                    let last = macro_matched.last_mut().unwrap();
+                    match last {
+                        Some(true) | None => *last = None,
+                        Some(false) => *last = Some(directives.contains(&parts[1].to_string())),
+                    }
+                }
+                "`else" => {
+                    let last = macro_matched.last_mut().unwrap();
+                    match last {
+                        Some(true) | None => *last = None,
+                        Some(false) => *last = Some(true),
+                    }
+                }
+                "`endif" => {
+                    macro_matched.pop();
+                }
+                _ => {}
+            }
+        } else {
+            let active = all_matched(&macro_matched) || wildcard;
+            if active {
+                if !wildcard && (trimmed.starts_with("-def") || trimmed.starts_with("`define")) {
+                    let def_parts: Vec<&str> = trimmed.split_whitespace().collect();
+                    if def_parts.len() >= 2 {
+                        directives.push(def_parts[1].to_string());
+                    }
+                } else {
+                    output.push((line.clone(), idx + 1));
+                }
+            }
+        }
+    }
+    output
+}
+
 pub fn read_filelists(
     paths: &[&Path],
     directives: &mut Vec<String>,
@@ -256,21 +328,22 @@ pub fn read_filelist(
     encode_with_env: Option<&str>,
 ) -> (Vec<String>, Vec<String>) {
     let mut visited: HashSet<PathBuf> = HashSet::new();
-    let mut cache: HashMap<PathBuf, (Vec<String>, Vec<String>)> = HashMap::new();
-    let (mut content, mut errors) = _read_filelist(path, directives, recursive, &mut visited, &mut cache);
+    let mut cache: HashMap<PathBuf, (Vec<(String, SourceLoc)>, Vec<String>)> = HashMap::new();
+    let (mut tagged_content, mut errors) = _read_filelist(path, directives, recursive, &mut visited, &mut cache);
 
     let effective_resolve = resolve_path || encode_with_env.is_some();
     let effective_check = check_exist || effective_resolve;
     let effective_dedup = deduplicate || effective_check;
 
     if effective_dedup {
-        dedup_vec(&mut content);
+        dedup_tagged_vec(&mut tagged_content);
         dedup_vec(&mut errors);
     }
 
+    let mut content: Vec<String>;
     if effective_check {
         let (processed_content, processed_errors) =
-            process_content_items(content, effective_check, effective_resolve, encode_with_env);
+            process_content_items(tagged_content, effective_check, effective_resolve, encode_with_env);
         content = processed_content;
         errors.extend(processed_errors);
 
@@ -280,6 +353,9 @@ pub fn read_filelist(
             dedup_vec(&mut content);
             dedup_vec(&mut errors);
         }
+    } else {
+        // Strip source locs when returning content without post-processing
+        content = tagged_content.into_iter().map(|(s, _)| s).collect();
     }
 
     (content, errors)
@@ -288,6 +364,11 @@ pub fn read_filelist(
 fn dedup_vec(v: &mut Vec<String>) {
     let mut seen = HashSet::new();
     v.retain(|item| seen.insert(item.clone()));
+}
+
+fn dedup_tagged_vec(v: &mut Vec<(String, SourceLoc)>) {
+    let mut seen = HashSet::new();
+    v.retain(|(item, _loc)| seen.insert(item.clone()));
 }
 
 fn resolve_canonical(path: &Path) -> PathBuf {
@@ -307,8 +388,8 @@ fn _read_filelist(
     directives: &mut Vec<String>,
     recursive: bool,
     visited: &mut HashSet<PathBuf>,
-    cache: &mut HashMap<PathBuf, (Vec<String>, Vec<String>)>,
-) -> (Vec<String>, Vec<String>) {
+    cache: &mut HashMap<PathBuf, (Vec<(String, SourceLoc)>, Vec<String>)>,
+) -> (Vec<(String, SourceLoc)>, Vec<String>) {
     let canonical = resolve_canonical(path);
 
     if let Some((content, errs)) = cache.get(&canonical) {
@@ -337,9 +418,9 @@ fn _read_filelist_impl(
     directives: &mut Vec<String>,
     recursive: bool,
     visited: &mut HashSet<PathBuf>,
-    cache: &mut HashMap<PathBuf, (Vec<String>, Vec<String>)>,
-) -> (Vec<String>, Vec<String>) {
-    let mut out_content: Vec<String> = Vec::new();
+    cache: &mut HashMap<PathBuf, (Vec<(String, SourceLoc)>, Vec<String>)>,
+) -> (Vec<(String, SourceLoc)>, Vec<String>) {
+    let mut out_content: Vec<(String, SourceLoc)> = Vec::new();
     let mut errs: Vec<String> = Vec::new();
 
     if !path.exists() {
@@ -355,9 +436,9 @@ fn _read_filelist_impl(
         }
     };
 
-    let filtered = directive_filter(&origin_content, directives);
+    let filtered = directive_filter_with_lines(&origin_content, directives);
 
-    for line in &filtered {
+    for (line, line_num) in &filtered {
         let trimmed = line.trim();
         if recursive && trimmed.starts_with("-f ") {
             let sub_path_str = trimmed[3..].trim();
@@ -369,11 +450,14 @@ fn _read_filelist_impl(
                     errs.extend(sub_errs);
                 }
                 Err(e) => {
-                    errs.push(e);
+                    errs.push(format!("{} ({})", e, path.display()));
                 }
             }
         } else if !trimmed.is_empty() && !trimmed.starts_with("//") {
-            out_content.push(trimmed.to_string());
+            out_content.push((trimmed.to_string(), SourceLoc {
+                file: path.to_path_buf(),
+                line: *line_num,
+            }));
         }
     }
 

@@ -6,7 +6,7 @@ Rust library + CLI + Python package that flattens Verilog filelists: resolves `-
 
 ```bash
 cargo build --release --no-default-features --target x86_64-unknown-linux-musl   # static binary
-cargo test                                                                       # Rust tests (45)
+cargo test --no-default-features                                                  # Rust tests (49)
 
 # Package: MUST copy binary before uv build
 cp target/x86_64-unknown-linux-musl/release/flatten-filelist flatten_filelist/_bin/
@@ -25,7 +25,7 @@ src/bin/flatten-filelist.rs  — CLI
 src/lib.rs, src/bindings.rs  — legacy PyO3 (feature-gated, unused in packaging)
 flatten_filelist/__init__.py — Python wrapper, subprocess.run the binary
 flatten_filelist/_bin/       — committed musl binary, copied from target/ before uv build
-tests/test_core.rs           — 45 Rust unit tests
+tests/test_core.rs           — 49 Rust unit tests
 pytests/                     — 15 Python integration tests
 ```
 
@@ -95,3 +95,4 @@ Errors from stderr are stripped of `ERROR: ` prefix. Platform guard raises `Runt
 - **`+libext+`/`+define+`**: opaque — no env expansion, no path resolution, no existence check.
 - **Symlinks**: not resolved anywhere (use `normalize_path` not `canonicalize`), except cycle detection which uses `Path::canonicalize` for identity.
 - **Platform**: musl x86_64 only; wheel tag is `py3-none-any` with runtime guard.
+- **Error source locations**: errors from within a filelist carry `(file:line)` context, e.g. `ENV_NOT_FOUND: VAR (path.f:3)` or `item not found: /x (path.f:5)`. Errors from different source locations are distinct strings and are NOT deduplicated. Internally, `_read_filelist_impl` uses `directive_filter_with_lines` (private) to track 1-based line numbers; content is carried as `Vec<(String, SourceLoc)>` through the internal pipeline and stripped back to `Vec<String>` in the public API.

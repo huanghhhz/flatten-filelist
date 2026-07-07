@@ -623,3 +623,95 @@ fn test_dedup_auto_on_with_check_exist() {
     assert_eq!(content, vec!["src/core.rs".to_string()]);
     assert!(errors.is_empty());
 }
+
+// --- error deduplication tests ---
+
+#[test]
+fn test_error_dedup_duplicate_env_failure_in_includes() {
+    // Two identical -f lines with unresolved $ENV in the same file.
+    // ENV_NOT_FOUND errors don't carry line numbers → identical
+    // strings → deduped to 1.
+    env::remove_var("MISSING_ERR_DEDUP_A");
+    let mut tmp = NamedTempFile::new().unwrap();
+    writeln!(tmp, "-f $MISSING_ERR_DEDUP_A/sub.f").unwrap();
+    writeln!(tmp, "-f $MISSING_ERR_DEDUP_A/sub.f").unwrap();
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(
+        tmp.path(), &mut directives, true, true, false, false, None,
+    );
+    assert!(content.is_empty());
+    // Same missing env → same error message → deduped to 1
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("ENV_NOT_FOUND"));
+}
+
+#[test]
+fn test_error_dedup_missing_item_across_filelists() {
+    // Two filelists, each with the same missing path. With source locs
+    // in errors, they carry different file names → not deduped → 2 errors.
+    let mut f1 = NamedTempFile::new().unwrap();
+    writeln!(f1, "/nonexistent/file_err_dedup.v").unwrap();
+    let mut f2 = NamedTempFile::new().unwrap();
+    writeln!(f2, "/nonexistent/file_err_dedup.v").unwrap();
+    let mut directives: Vec<String> = vec![];
+    let paths: Vec<&Path> = vec![f1.path(), f2.path()];
+    let (content, errors) = read_filelists(
+        &paths, &mut directives, true, false, true, false, None,
+    );
+    // Content: each filelist contributes the missing path; cross-filelist dedup keeps one
+    assert_eq!(content, vec!["/nonexistent/file_err_dedup.v".to_string()]);
+    // Errors: different file names in source loc → 2 errors, not deduped
+    assert_eq!(errors.len(), 2);
+    assert!(errors[0].contains("not found"));
+    assert!(errors[0].contains(":1)"));
+    assert!(errors[1].contains("not found"));
+    assert!(errors[1].contains(":1)"));
+}
+
+#[test]
+fn test_error_dedup_sub_file_error_across_filelists() {
+    // Two top-level filelists each -f include the same sub-filelist
+    // that itself has an unresolved $ENV. Each read_filelist call
+    // independently parses the sub-file, producing the same error.
+    // read_filelists dedup → 1.
+    env::remove_var("MISSING_ERR_DEDUP_C");
+    let mut sub = NamedTempFile::new().unwrap();
+    writeln!(sub, "-f $MISSING_ERR_DEDUP_C/subsub.f").unwrap();
+    let sub_path = sub.path().to_str().unwrap().to_string();
+
+    let mut a = NamedTempFile::new().unwrap();
+    writeln!(a, "top/a.v").unwrap();
+    writeln!(a, "-f {}", sub_path).unwrap();
+    let mut b = NamedTempFile::new().unwrap();
+    writeln!(b, "top/b.v").unwrap();
+    writeln!(b, "-f {}", sub_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let paths: Vec<&Path> = vec![a.path(), b.path()];
+    let (content, errors) = read_filelists(
+        &paths, &mut directives, true, true, false, false, None,
+    );
+    assert_eq!(content, vec!["top/a.v".to_string(), "top/b.v".to_string()]);
+    // The sub-file's env error appears in each read_filelist call;
+    // same file + same line → identical error string → deduped to 1.
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("ENV_NOT_FOUND"));
+}
+
+#[test]
+fn test_no_dedup_errors_when_flags_off() {
+    // deduplicate=false and no other flags → errors NOT deduped
+    env::remove_var("MISSING_ERR_DEDUP_D");
+    let mut tmp = NamedTempFile::new().unwrap();
+    writeln!(tmp, "-f $MISSING_ERR_DEDUP_D/sub.f").unwrap();
+    writeln!(tmp, "-f $MISSING_ERR_DEDUP_D/sub.f").unwrap();
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(
+        tmp.path(), &mut directives, true, false, false, false, None,
+    );
+    assert!(content.is_empty());
+    // deduplicate=false → both identical errors are preserved
+    assert_eq!(errors.len(), 2);
+    assert!(errors[0].contains("ENV_NOT_FOUND"));
+    assert!(errors[1].contains("ENV_NOT_FOUND"));
+}
