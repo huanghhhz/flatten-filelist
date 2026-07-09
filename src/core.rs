@@ -329,7 +329,7 @@ pub fn read_filelist(
 ) -> (Vec<String>, Vec<String>) {
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let mut cache: HashMap<PathBuf, (Vec<(String, SourceLoc)>, Vec<String>)> = HashMap::new();
-    let (mut tagged_content, mut errors) = _read_filelist(path, directives, recursive, &mut visited, &mut cache);
+    let (mut tagged_content, mut errors) = _read_filelist(path, directives, recursive, &mut visited, &mut cache, None);
 
     let effective_resolve = resolve_path || encode_with_env.is_some();
     let effective_check = check_exist || effective_resolve;
@@ -371,6 +371,18 @@ fn dedup_tagged_vec(v: &mut Vec<(String, SourceLoc)>) {
     v.retain(|(item, _loc)| seen.insert(item.clone()));
 }
 
+fn resolve_item_relative_to_base(item: &str, base: &Path) -> String {
+    if item.starts_with('+') && !item.starts_with("+incdir+") {
+        return item.to_string();
+    }
+    let (prefix, path_str) = parse_item_path(item);
+    if Path::new(path_str).is_absolute() {
+        return item.to_string();
+    }
+    let resolved = normalize_path(&base.join(path_str));
+    format!("{}{}", prefix, resolved.to_string_lossy())
+}
+
 fn resolve_canonical(path: &Path) -> PathBuf {
     match path.canonicalize() {
         Ok(p) => p,
@@ -389,11 +401,14 @@ fn _read_filelist(
     recursive: bool,
     visited: &mut HashSet<PathBuf>,
     cache: &mut HashMap<PathBuf, (Vec<(String, SourceLoc)>, Vec<String>)>,
+    base_dir: Option<&Path>,
 ) -> (Vec<(String, SourceLoc)>, Vec<String>) {
     let canonical = resolve_canonical(path);
 
-    if let Some((content, errs)) = cache.get(&canonical) {
-        return (content.clone(), errs.clone());
+    if base_dir.is_none() {
+        if let Some((content, errs)) = cache.get(&canonical) {
+            return (content.clone(), errs.clone());
+        }
     }
 
     if !visited.insert(canonical.clone()) {
@@ -405,11 +420,13 @@ fn _read_filelist(
     }
 
     // Ensure we clean up visited on every return path
-    let result = _read_filelist_impl(path, directives, recursive, visited, cache);
+    let result = _read_filelist_impl(path, directives, recursive, visited, cache, base_dir);
 
     visited.remove(&canonical);
 
-    cache.insert(canonical, result.clone());
+    if base_dir.is_none() {
+        cache.insert(canonical, result.clone());
+    }
     result
 }
 
@@ -419,6 +436,7 @@ fn _read_filelist_impl(
     recursive: bool,
     visited: &mut HashSet<PathBuf>,
     cache: &mut HashMap<PathBuf, (Vec<(String, SourceLoc)>, Vec<String>)>,
+    base_dir: Option<&Path>,
 ) -> (Vec<(String, SourceLoc)>, Vec<String>) {
     let mut out_content: Vec<(String, SourceLoc)> = Vec::new();
     let mut errs: Vec<String> = Vec::new();
@@ -440,12 +458,29 @@ fn _read_filelist_impl(
 
     for (line, line_num) in &filtered {
         let trimmed = line.trim();
-        if recursive && trimmed.starts_with("-f ") {
+        if recursive && trimmed.starts_with("-F ") {
             let sub_path_str = trimmed[3..].trim();
             match env_decode(sub_path_str) {
                 Ok(decoded) => {
                     let sub_path = Path::new(&decoded);
-                    let (sub_content, sub_errs) = _read_filelist(sub_path, directives, recursive, visited, cache);
+                    let sub_base_dir = resolve_canonical(sub_path).parent().map(|p| p.to_path_buf());
+                    let (sub_content, sub_errs) = _read_filelist(
+                        sub_path, directives, recursive, visited, cache,
+                        sub_base_dir.as_deref(),
+                    );
+                    out_content.extend(sub_content);
+                    errs.extend(sub_errs);
+                }
+                Err(e) => {
+                    errs.push(format!("{} ({})", e, path.display()));
+                }
+            }
+        } else if recursive && trimmed.starts_with("-f ") {
+            let sub_path_str = trimmed[3..].trim();
+            match env_decode(sub_path_str) {
+                Ok(decoded) => {
+                    let sub_path = Path::new(&decoded);
+                    let (sub_content, sub_errs) = _read_filelist(sub_path, directives, recursive, visited, cache, None);
                     out_content.extend(sub_content);
                     errs.extend(sub_errs);
                 }
@@ -454,7 +489,12 @@ fn _read_filelist_impl(
                 }
             }
         } else if !trimmed.is_empty() && !trimmed.starts_with("//") {
-            out_content.push((trimmed.to_string(), SourceLoc {
+            let resolved = if let Some(base) = base_dir {
+                resolve_item_relative_to_base(trimmed, base)
+            } else {
+                trimmed.to_string()
+            };
+            out_content.push((resolved, SourceLoc {
                 file: path.to_path_buf(),
                 line: *line_num,
             }));

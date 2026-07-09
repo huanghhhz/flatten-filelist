@@ -1,6 +1,7 @@
 use flatten_filelist::core::directive_filter;
 use flatten_filelist::core::env_decode;
 use std::env;
+use std::fs;
 
 #[test]
 fn test_env_decode_basic_expansion() {
@@ -714,4 +715,213 @@ fn test_no_dedup_errors_when_flags_off() {
     assert_eq!(errors.len(), 2);
     assert!(errors[0].contains("ENV_NOT_FOUND"));
     assert!(errors[1].contains("ENV_NOT_FOUND"));
+}
+
+// --- tests for -F (resolve paths relative to sub-filelist) ---
+
+#[test]
+fn test_f_include_relative_paths_resolved() {
+    let mut sub = NamedTempFile::new().unwrap();
+    writeln!(sub, "file.v").unwrap();
+    let sub_path = sub.path().to_str().unwrap().to_string();
+    let sub_dir = sub.path().parent().unwrap();
+
+    let mut main = NamedTempFile::new().unwrap();
+    writeln!(main, "-F {}", sub_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(main.path(), &mut directives, true, true, false, false, None);
+    let expected = normalize_path_in_test(&sub_dir.join("file.v"));
+    assert_eq!(content, vec![expected.to_string_lossy().to_string()]);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_f_include_with_prefix_v() {
+    let mut sub = NamedTempFile::new().unwrap();
+    writeln!(sub, "-v file.v").unwrap();
+    let sub_path = sub.path().to_str().unwrap().to_string();
+    let sub_dir = sub.path().parent().unwrap();
+
+    let mut main = NamedTempFile::new().unwrap();
+    writeln!(main, "-F {}", sub_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(main.path(), &mut directives, true, true, false, false, None);
+    let expected = normalize_path_in_test(&sub_dir.join("file.v"));
+    assert_eq!(content, vec![format!("-v {}", expected.to_string_lossy())]);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_f_include_with_prefix_y() {
+    let mut sub = NamedTempFile::new().unwrap();
+    writeln!(sub, "-y file.v").unwrap();
+    let sub_path = sub.path().to_str().unwrap().to_string();
+    let sub_dir = sub.path().parent().unwrap();
+
+    let mut main = NamedTempFile::new().unwrap();
+    writeln!(main, "-F {}", sub_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(main.path(), &mut directives, true, true, false, false, None);
+    let expected = normalize_path_in_test(&sub_dir.join("file.v"));
+    assert_eq!(content, vec![format!("-y {}", expected.to_string_lossy())]);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_f_include_with_incdir() {
+    let mut sub = NamedTempFile::new().unwrap();
+    writeln!(sub, "+incdir+dir").unwrap();
+    let sub_path = sub.path().to_str().unwrap().to_string();
+    let sub_dir = sub.path().parent().unwrap();
+
+    let mut main = NamedTempFile::new().unwrap();
+    writeln!(main, "-F {}", sub_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(main.path(), &mut directives, true, true, false, false, None);
+    let expected = normalize_path_in_test(&sub_dir.join("dir"));
+    assert_eq!(content, vec![format!("+incdir+{}", expected.to_string_lossy())]);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_f_include_absolute_paths_unchanged() {
+    let mut sub = NamedTempFile::new().unwrap();
+    writeln!(sub, "/absolute/path/to/file.v").unwrap();
+    let sub_path = sub.path().to_str().unwrap().to_string();
+
+    let mut main = NamedTempFile::new().unwrap();
+    writeln!(main, "-F {}", sub_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(main.path(), &mut directives, true, true, false, false, None);
+    assert_eq!(content, vec!["/absolute/path/to/file.v".to_string()]);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_f_include_opaque_plus_directives_unchanged() {
+    let mut sub = NamedTempFile::new().unwrap();
+    writeln!(sub, "+libext+.v").unwrap();
+    writeln!(sub, "+define+MACRO").unwrap();
+    let sub_path = sub.path().to_str().unwrap().to_string();
+
+    let mut main = NamedTempFile::new().unwrap();
+    writeln!(main, "-F {}", sub_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(main.path(), &mut directives, true, true, false, false, None);
+    assert_eq!(content, vec!["+libext+.v".to_string(), "+define+MACRO".to_string()]);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_f_include_nested_with_different_base_dirs() {
+    let sub_dir = tempfile::tempdir().unwrap();
+    let inner_sub_dir = sub_dir.path().join("inner");
+    fs::create_dir(&inner_sub_dir).unwrap();
+
+    let mut deep = NamedTempFile::new_in(&inner_sub_dir).unwrap();
+    writeln!(deep, "deep_file.v").unwrap();
+    let deep_path = deep.path().to_str().unwrap().to_string();
+
+    let mut mid = NamedTempFile::new_in(&sub_dir).unwrap();
+    writeln!(mid, "mid_file.v").unwrap();
+    writeln!(mid, "-F {}", deep_path).unwrap();
+    let mid_path = mid.path().to_str().unwrap().to_string();
+
+    let mut main = NamedTempFile::new().unwrap();
+    writeln!(main, "main_file.v").unwrap();
+    writeln!(main, "-F {}", mid_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(main.path(), &mut directives, true, true, false, false, None);
+
+    let expected_mid = normalize_path_in_test(&sub_dir.path().join("mid_file.v"));
+    let expected_deep = normalize_path_in_test(&inner_sub_dir.join("deep_file.v"));
+    assert_eq!(content, vec![
+        "main_file.v".to_string(),
+        expected_mid.to_string_lossy().to_string(),
+        expected_deep.to_string_lossy().to_string(),
+    ]);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_f_include_mixed_with_f() {
+    // -F includes resolve relative; -f includes do not
+    let mut f_sub = NamedTempFile::new().unwrap();
+    writeln!(f_sub, "f_relative.v").unwrap();
+    let f_sub_path = f_sub.path().to_str().unwrap().to_string();
+
+    let mut f_sub2 = NamedTempFile::new().unwrap();
+    writeln!(f_sub2, "F_relative.v").unwrap();
+    let f_sub2_path = f_sub2.path().to_str().unwrap().to_string();
+    let f_sub2_dir = f_sub2.path().parent().unwrap();
+
+    let mut main = NamedTempFile::new().unwrap();
+    writeln!(main, "-f {}", f_sub_path).unwrap();
+    writeln!(main, "-F {}", f_sub2_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(main.path(), &mut directives, true, true, false, false, None);
+    let expected_f2 = normalize_path_in_test(&f_sub2_dir.join("F_relative.v"));
+    assert_eq!(content, vec![
+        "f_relative.v".to_string(),
+        expected_f2.to_string_lossy().to_string(),
+    ]);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_f_include_no_recursive_treated_as_literal() {
+    let mut sub = NamedTempFile::new().unwrap();
+    writeln!(sub, "file.v").unwrap();
+    let sub_path = sub.path().to_str().unwrap().to_string();
+
+    let mut main = NamedTempFile::new().unwrap();
+    writeln!(main, "main.v").unwrap();
+    writeln!(main, "-F {}", sub_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(main.path(), &mut directives, false, true, false, false, None);
+    assert_eq!(content, vec![
+        "main.v".to_string(),
+        format!("-F {}", sub_path),
+    ]);
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn test_f_include_circular_detection() {
+    let mut a = NamedTempFile::new().unwrap();
+    let a_path = a.path().to_str().unwrap().to_string();
+    writeln!(a, "top/file.v").unwrap();
+    writeln!(a, "-F {}", a_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(a.path(), &mut directives, true, true, false, false, None);
+    assert_eq!(content, vec!["top/file.v".to_string()]);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("circular include detected"));
+}
+
+#[test]
+fn test_f_include_with_dotdot() {
+    let mut sub = NamedTempFile::new().unwrap();
+    writeln!(sub, "../sibling.v").unwrap();
+    let sub_path = sub.path().to_str().unwrap().to_string();
+    let sub_dir = sub.path().parent().unwrap();
+
+    let mut main = NamedTempFile::new().unwrap();
+    writeln!(main, "-F {}", sub_path).unwrap();
+
+    let mut directives: Vec<String> = vec![];
+    let (content, errors) = read_filelist(main.path(), &mut directives, true, true, false, false, None);
+    let expected = normalize_path_in_test(&sub_dir.join("../sibling.v"));
+    assert_eq!(content, vec![expected.to_string_lossy().to_string()]);
+    assert!(errors.is_empty());
 }
